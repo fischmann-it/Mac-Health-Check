@@ -17,7 +17,7 @@
 #
 # HISTORY
 #
-# Version 4.0.0, 14-Jul-2026, Dan K. Snelson (@dan-snelson)
+# Version 4.1.0, 17-Aug-2026, Dan K. Snelson (@dan-snelson)
 # - See CHANGELOG.md for details
 #
 ####################################################################################################
@@ -33,7 +33,7 @@
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin/
 
 # Script Version
-scriptVersion="4.0.0"
+scriptVersion="4.1.0"
 
 # Client-side Log
 scriptLog="/var/log/org.churchofjesuschrist.log"
@@ -391,9 +391,13 @@ sofaCacheMaximumAge="1d"
 # Allowed number of uptime minutes
 # - 1 day = 24 hours × 60 minutes/hour = 1,440 minutes
 # - 7 days, multiply: 7 × 1,440 minutes = 10,080 minutes
+# - 30 days, multiply: 30 × 1,440 minutes = 43,200 minutes
+# Use maxUptimeMinutes="" to turn the max uptime check off if desired.
 allowedUptimeMinutes="10080"
+maxUptimeMinutes="43200"
 
 # Should excessive uptime result in a "warning" or "error" ?
+# Setting this to error will disable the max uptime check above
 excessiveUptimeAlertStyle="warning"
 
 # Completion Timer (in seconds)
@@ -4617,7 +4621,7 @@ function buildInspectItemsJSONArray() {
 function buildInspectConfigJSON() {
 
     local inspectHighlightColor="#F69325"
-    local inspectWindowHeight="750"
+    local inspectWindowHeight="850"
     local inspectWindowWidth="975"
 
     printf '%s' "{"
@@ -4672,7 +4676,7 @@ function validateInspectConfigFile() {
                 and (.category | length > 0)
             )
         )
-        and (.height == 750)
+        and (.height == 850)
         and (.width == 975)
         and (.items | type == "array")
         and (.items | length >= 3)
@@ -4916,7 +4920,7 @@ function launchInspectSummary() {
         return 1
     fi
 
-    launchCommand="/usr/bin/nohup /usr/bin/env DIALOG_INSPECT_CONFIG=${(q)inspectConfigToLaunch} DIALOG_DEBUG=1 ${(q)dialogBinary} --inspect-mode --inspect-config ${(q)inspectConfigToLaunch} >${(q)inspectLaunchLogPath} 2>&1 </dev/null & print -r -- \$!"
+    launchCommand="/usr/bin/nohup /usr/bin/env DIALOG_INSPECT_CONFIG=${(q)inspectConfigToLaunch} DIALOG_DEBUG=1 ${(q)dialogBinary} --inspect-mode --inspect-config ${(q)inspectConfigToLaunch} --ontop --moveable >${(q)inspectLaunchLogPath} 2>&1 </dev/null & print -r -- \$!"
     inspectPID="$( runAsUser /bin/zsh -lc "${launchCommand}" 2>/dev/null | tr -d '[:space:]' )"
 
     if [[ ! "${inspectPID}" == <-> ]]; then
@@ -5820,9 +5824,29 @@ function checkStagedUpdate() {
     local stagedUpdateSize="0"
     local stagedUpdateLocation="Not detected"
     local stagedUpdateStatus="Pending download"
+    local stagedSnapshotTimeoutSeconds="10"
+    local snapshotListOutput=""
+    local snapshotListExitCode="0"
+    local updateSnapshots="0"
     
     # Check for APFS snapshots indicating staged updates
-    local updateSnapshots=$(tmutil listlocalsnapshots / 2>/dev/null | grep -c "com.apple.os.update")
+    snapshotListOutput="$( captureCommandOutputWithTimeout "${stagedSnapshotTimeoutSeconds}" /usr/sbin/diskutil apfs listsnapshots / )"
+    snapshotListExitCode="$?"
+    case "${snapshotListExitCode}" in
+        "0" )
+            ;;
+        "124" )
+            info "APFS snapshot check timed out after ${stagedSnapshotTimeoutSeconds} seconds; continuing with Preboot staging checks."
+            ;;
+        * )
+            info "APFS snapshot check returned exit ${snapshotListExitCode}; continuing with Preboot staging checks."
+            ;;
+    esac
+
+    updateSnapshots="$( printf '%s' "${snapshotListOutput}" | grep -c "com.apple.os.update" )"
+    if [[ "${updateSnapshots}" != <-> ]]; then
+        updateSnapshots="0"
+    fi
     
     if [[ ${updateSnapshots} -gt 0 ]]; then
         info "Found ${updateSnapshots} update snapshot(s)"
@@ -5839,7 +5863,17 @@ function checkStagedUpdate() {
 
     if [[ -z "${systemVolumeUUID}" ]]; then
         info "No Preboot UUID directory found; staging cannot be evaluated."
-        updateStagingStatus="Pending download"
+        updateStagedSize="${stagedUpdateSize}"
+        updateStagedLocation="${stagedUpdateLocation}"
+        updateStagingStatus="${stagedUpdateStatus}"
+        case "${updateStagingStatus}" in
+            "Partially staged")
+                stagingMessage="Preparing update …"
+                ;;
+            *)
+                stagingMessage="Will start download when you open System Settings > General > Software Update"
+                ;;
+        esac
         return
     fi
 
@@ -6619,6 +6653,9 @@ function checkUptime() {
     uptimeDays=$( uptime | awk '{ print $4 }' | sed 's/,//g' )
     uptimeNumber=$( uptime | awk '{ print $3 }' | sed 's/,//g' )
 
+    local uptimeExtendedStatus="Thanks for restarting your Mac regularly."
+    local effectiveMaxUptimeMinutes="${maxUptimeMinutes}"
+
     if [[ "${uptimeDays}" = "day"* ]]; then
         if [[ "${uptimeNumber}" -gt 1 ]]; then
             uptimeHumanReadable="${uptimeNumber} days"
@@ -6630,32 +6667,49 @@ function checkUptime() {
     else
         uptimeHumanReadable="${uptimeNumber} (HH:MM)"
     fi
+    
+    if [[ -n "${effectiveMaxUptimeMinutes}" ]]; then
+        if [[ "${effectiveMaxUptimeMinutes}" =~ '^[1-9][0-9]*$' ]]; then
+            if [[ "${allowedUptimeMinutes}" -gt "${effectiveMaxUptimeMinutes}" ]]; then
+                warning "${humanReadableCheckName}: Error in configuration: Variable allowedUptimeMinutes is greater than maxUptimeMinutes. Maximum uptime check disabled."
+                effectiveMaxUptimeMinutes=""
+            elif [[ "${excessiveUptimeAlertStyle}" == "error" ]]; then
+                warning "${humanReadableCheckName}: Error in configuration: Variable excessiveUptimeAlertStyle is set to error instead of warning. Maximum uptime check disabled."
+                effectiveMaxUptimeMinutes=""
+            fi
+        else
+            warning "${humanReadableCheckName}: Error in configuration: Variable maxUptimeMinutes is not a positive integer. Maximum uptime check disabled."
+            effectiveMaxUptimeMinutes=""
+        fi
+    fi
 
-    if [[ "${upTimeMin}" -gt "${allowedUptimeMinutes}" ]]; then
-
+    if [[ -n "${effectiveMaxUptimeMinutes}" ]] && [[ "${upTimeMin}" -gt "${effectiveMaxUptimeMinutes}" ]]; then
+        local uptimeExtendedStatus="Your Mac's uptime is beyond the maximum allowed by your organization."
+        dialogUpdate "listitem: index: ${1}, icon: SF=$(printf "%02d" $(($1+1))).circle.fill weight=bold colour=${statusColorFail}, iconalpha: 1, subtitle: ${uptimeExtendedStatus}, status: fail, statustext: ${uptimeHumanReadable}"
+        errorOut "${humanReadableCheckName}: ${uptimeHumanReadable}: ${uptimeExtendedStatus}"
+        overallHealth+="${humanReadableCheckName}; "
+    elif [[ "${upTimeMin}" -gt "${allowedUptimeMinutes}" ]]; then
+        local uptimeExtendedStatus="Please restart your Mac regularly. "
         case ${excessiveUptimeAlertStyle} in
 
-            "warning" ) 
-                dialogUpdate "listitem: index: ${1}, icon: SF=$(printf "%02d" $(($1+1))).circle.fill weight=bold colour=${statusColorError}, iconalpha: 1, subtitle: Please restart your Mac regularly, status: error, statustext: ${uptimeHumanReadable}"
+            "warning" )
+                dialogUpdate "listitem: index: ${1}, icon: SF=$(printf "%02d" $(($1+1))).circle.fill weight=bold colour=${statusColorError}, iconalpha: 1, subtitle: ${uptimeExtendedStatus}, status: error, statustext: ${uptimeHumanReadable}"
                 footerStatusColor="${statusColorError}"
-                warning "${humanReadableCheckName}: ${uptimeHumanReadable}"
+                warning "${humanReadableCheckName}: ${uptimeHumanReadable}: ${uptimeExtendedStatus}"
                 ;;
 
             "error" | * )
-                dialogUpdate "listitem: index: ${1}, icon: SF=$(printf "%02d" $(($1+1))).circle.fill weight=bold colour=${statusColorFail}, iconalpha: 1, subtitle: Please restart your Mac regularly, status: fail, statustext: ${uptimeHumanReadable}"
+                dialogUpdate "listitem: index: ${1}, icon: SF=$(printf "%02d" $(($1+1))).circle.fill weight=bold colour=${statusColorFail}, iconalpha: 1, subtitle: ${uptimeExtendedStatus}, status: fail, statustext: ${uptimeHumanReadable}"
                 footerStatusColor="${statusColorFail}"
-                errorOut "${humanReadableCheckName}: ${uptimeHumanReadable}"
+                errorOut "${humanReadableCheckName}: ${uptimeHumanReadable}: ${uptimeExtendedStatus}"
                 overallHealth+="${humanReadableCheckName}; "
                 ;;
 
         esac
-    
     else
-    
-        dialogUpdate "listitem: index: ${1}, icon: SF=$(printf "%02d" $(($1+1))).circle.fill weight=semibold colour=${statusColorSuccess}, iconalpha: 0.9, subtitle: Thanks for restarting your Mac regularly, status: success, statustext: ${uptimeHumanReadable}"
+        dialogUpdate "listitem: index: ${1}, icon: SF=$(printf "%02d" $(($1+1))).circle.fill weight=semibold colour=${statusColorSuccess}, iconalpha: 0.6, subtitle: ${uptimeExtendedStatus}, status: success, statustext: ${uptimeHumanReadable}"
         footerStatusColor="${statusColorSuccess}"
-        info "${humanReadableCheckName}: ${uptimeHumanReadable}"
-    
+        info "${humanReadableCheckName}: ${uptimeHumanReadable}: ${uptimeExtendedStatus}"
     fi
 
     dialogUpdate "icon: SF=stopwatch,weight=semibold,colour=${footerStatusColor}"
@@ -8515,10 +8569,11 @@ function checkBluetoothSharing() {
     sleep "${anticipationDuration}"
     
     # Check Bluetooth sharing settings using -currentHost as per macOS Security Compliance Project
-    local result=$( captureRunAsUserOutput defaults -currentHost read com.apple.Bluetooth PrefKeyServicesEnabled )
-    
-    # If the key doesn't exist or is 0, Bluetooth sharing is disabled (compliant)
-    if [[ "${result}" == "0" ]] || [[ "${result}" =~ "does not exist" ]]; then
+    local result=""
+    result=$( captureRunAsUserOutput defaults -currentHost read com.apple.Bluetooth PrefKeyServicesEnabled )
+
+    # A missing preference retains macOS's disabled default; macOS 27 reports a missing domain differently.
+    if [[ "${result}" == "0" ]] || [[ "${result}" == *"does not exist"* ]] || [[ "${result}" == *"Domain 'com.apple.Bluetooth' not found"* ]]; then
         info "${humanReadableCheckName}: Disabled"
         dialogUpdate "listitem: index: ${1}, icon: SF=$(printf "%02d" $(($1+1))).circle.fill weight=semibold colour=${statusColorSuccess}, iconalpha: 0.9, subtitle: ${organizationBoilerplateComplianceMessage}, status: success, statustext: Disabled"
     else
@@ -8627,7 +8682,7 @@ function checkAirPlayReceiver() {
         if [[ "${osMajorVersion}" -eq 15 && "${osMinorVersion}" -ge 7 ]]; then
             # 15.7.x: assume Enabled when key is missing
             errorOut "${humanReadableCheckName}: Enabled (no ${keyFound:-AirplayReceiverEnabled} key; default behavior on macOS ${osMajorVersion}.${osMinorVersion})"
-            dialogUpdate "listitem: index: ${1}, icon: SF=$(printf "%02d" $(($1+1))).circle.fill weight=bold colour=${statusColorFail}, iconalpha: 1, subtitle: System Settings > General > AirDrop & Handoff > AirPlay Receiver > Disable, status: fail, statustext: Enabled"
+            dialogUpdate "listitem: index: ${1}, icon: SF=$(printf "%02d" $(($1+1))).circle.fill weight=bold colour=${statusColorFail}, iconalpha: 1, subtitle: System Settings > General > AirDrop & Continuity > AirPlay Receiver > Disable, status: fail, statustext: Enabled"
             overallHealth+="${humanReadableCheckName}; "
             footerStatusColor="${statusColorFail}"
         else
@@ -8644,7 +8699,7 @@ function checkAirPlayReceiver() {
     elif [[ "${result}" == "1" ]]; then
         # Value is 1, enabled (non-compliant)
         errorOut "${humanReadableCheckName}: Enabled (${keyFound}=${result})"
-        dialogUpdate "listitem: index: ${1}, icon: SF=$(printf "%02d" $(($1+1))).circle.fill weight=bold colour=${statusColorFail}, iconalpha: 1, subtitle: System Settings > General > AirDrop & Handoff > AirPlay Receiver > Disable, status: fail, statustext: Enabled"
+        dialogUpdate "listitem: index: ${1}, icon: SF=$(printf "%02d" $(($1+1))).circle.fill weight=bold colour=${statusColorFail}, iconalpha: 1, subtitle: System Settings > General > AirDrop & Continuity > AirPlay Receiver > Disable, status: fail, statustext: Enabled"
         overallHealth+="${humanReadableCheckName}; "
         footerStatusColor="${statusColorFail}"
 
@@ -8656,7 +8711,7 @@ function checkAirPlayReceiver() {
     else
         # Unexpected value
         warning "${humanReadableCheckName}: Unexpected value (${keyFound}=${result})"
-        dialogUpdate "listitem: index: ${1}, icon: SF=$(printf "%02d" $(($1+1))).circle.fill weight=bold colour=${statusColorError}, iconalpha: 1, subtitle: System Settings > General > AirDrop & Handoff > AirPlay Receiver > Disable, status: error, statustext: Status Unknown"
+        dialogUpdate "listitem: index: ${1}, icon: SF=$(printf "%02d" $(($1+1))).circle.fill weight=bold colour=${statusColorError}, iconalpha: 1, subtitle: System Settings > General > AirDrop & Continuity > AirPlay Receiver > Disable, status: error, statustext: Status Unknown"
         footerStatusColor="${statusColorError}"
     fi
 
@@ -8693,7 +8748,7 @@ function checkAirDropSettings() {
         dialogUpdate "listitem: index: ${1}, icon: SF=$(printf "%02d" $(($1+1))).circle.fill weight=semibold colour=${statusColorSuccess}, iconalpha: 0.9, subtitle: ${organizationBoilerplateComplianceMessage}, status: success, statustext: Compliant"
     else
         errorOut "${humanReadableCheckName}: Discoverable by Everyone (value: ${result})"
-        dialogUpdate "listitem: index: ${1}, icon: SF=$(printf "%02d" $(($1+1))).circle.fill weight=bold colour=${statusColorFail}, iconalpha: 1, subtitle: System Settings > General > AirDrop & Handoff > AirDrop > No One / Contacts Only, status: fail, statustext: Everyone"
+        dialogUpdate "listitem: index: ${1}, icon: SF=$(printf "%02d" $(($1+1))).circle.fill weight=bold colour=${statusColorFail}, iconalpha: 1, subtitle: System Settings > General > AirDrop & Continuity > AirDrop > No One / Contacts Only, status: fail, statustext: Everyone"
         overallHealth+="${humanReadableCheckName}; "
         footerStatusColor="${statusColorFail}"
     fi
@@ -8796,7 +8851,7 @@ if [[ "${operationMode}" == "Development" ]]; then
 
     developmentListitemJSON='
     [
-        {"title" : "Entra ID Registration", "subtitle" : "Checks Microsoft Entra registration for current user context", "icon" : "SF=19.circle,'"${organizationColorScheme}"'", "status" : "pending", "statustext" : "Pending …", "iconalpha" : 0.5}
+        {"title" : "Bluetooth Sharing", "subtitle" : "Ensure Bluetooth Sharing is disabled when not needed", "icon" : "SF=19.circle,'"${organizationColorScheme}"'", "status" : "pending", "statustext" : "Pending …", "iconalpha" : 0.5}
     ]
     '
     # Validate developmentListitemJSON is valid JSON
@@ -8941,7 +8996,7 @@ if [[ "${operationMode}" == "Development" ]]; then
     notice "Operation Mode is ${operationMode}; using ${operationMode}-specific Health Check."
     dialogUpdate "title: ${humanReadableScriptName} (${scriptVersion})<br>Operation Mode: ${operationMode}"
     # set -x
-    checkEntraIDRegistration "0"
+    checkBluetoothSharing "0"
     # set +x
 
 else

@@ -2,6 +2,13 @@
 
 ## CHANGELOG
 
+### 4.1.0 (17-Aug-2026)
+- Refactored `checkBluetoothSharing()` to recognize the macOS 27 missing-domain response as the disabled default, preventing false-positive Bluetooth Sharing findings while preserving enabled-state detection on macOS 26 and macOS 27
+- Updated detached Inspect Mode Preset 6 dialogs to remain on top and allow users to move the window (thanks for the suggestion, @TechTrekkie!)
+- Hardened staged macOS update snapshot detection to use APFS-native `diskutil` with timeout-safe fallback behavior (thanks for PR #99, @HowardGMac!)
+- Updated `checkUptime()` with new functionality (thanks for PR #96, @HowardGMac!)
+- Standardized `checkUptime()`
+
 ### 4.0.0 (16-Jul-2026)
 - Raised the minimum required swiftDialog version to `3.1.0.4994` and refactored pre-flight checks to skip redundant production package downloads when the installed release already matches the latest production build
 - Added JSON health reporting with optional Splunk HTTP Event Collector (HEC) delivery, plus stricter cached-report validation so failed cached uploads no longer look like successful report generation
